@@ -1,0 +1,19 @@
+name: test-hardhat
+
+ethereum:
+  default_network: sepolia-fork
+  sepolia_fork:
+    default_provider: hardhat
+
+hardhat:
+  hardhat_config_file: ./hardhat.config.js
+
+solidity:
+  version: 0.8.28
+  import_remapping:
+    - "hardhat/=./node_modules/hardhat/"
+
+dependencies:
+  - name: openzeppelin
+    github: OpenZeppelin/openzeppelin-contracts
+    version: 5.0.0
