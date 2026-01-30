@@ -25,70 +25,78 @@ contract Gambit is ERC1155Holder {
 
     // Enums for convenience/readability
     enum BetStatus { Open, Challenged, Ongoing, Resolved, Disupted, Cancelled }
-    enum BetPosition { Undecided, For, Against }
 
     // Bet data
     struct Bet {
-        address creator;
-        address challenger;
+        address[] participants;
+        uint256 num_participants;
         uint256 amount;
-        uint256 probability;
+        uint256 probability; // Special case for 1-1 bets
         uint256 startTimeStamp;
         uint256 endTimeStamp;
         bytes32 conditionId;
         BetStatus status;
-        BetPosition creatorPosition;
-        BetPosition challengerPosition;
+        uint256[] outcomePositions;
     }
-
-    // Cheap transactions sent over the blockchain to broadcast important events
-    event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, uint256 endTimeStamp);
-    event BetChallenged(bytes32 indexed questionId, address indexed challenger);
-    event BetConfirmed(bytes32 indexed questionId, address indexed creator, bool indexed accepted);
-    event BetResolved(bytes indexed questionId, address indexed participant, BetPosition indexed outcome);
-    event BetDisputed(bytes32 indexed, address indexed disputer);
 
     // Mapping (dictionary) with key questionId and value Bet struct
     mapping(bytes32 => Bet) public bets;
     mapping(bytes32 => bytes32) public assertionsToQuestions;
 
-    function createBet(uint256 amount, uint256 probability, bytes32 questionId, uint256 endTimeStamp) external {
+    // Cheap transactions sent over the blockchain to broadcast important events
+    event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, uint256 num_participants, uint256 endTimeStamp);
+    event BetChallenged(bytes32 indexed questionId, address indexed challenger);
+    event BetConfirmed(bytes32 indexed questionId, address indexed creator, bool indexed accepted);
+    event BetResolved(bytes indexed questionId, address indexed participant, BetPosition indexed outcome);
+    event BetDisputed(bytes32 indexed, address indexed disputer);
+
+    function createBet(uint256 amount, uint256 probability, bytes32 questionId, uint256 num_participants, uint256 endTimeStamp) external {
         require(probability > 0 && probability < 10**18, "Invalid probability");
         require(amount > 0, "Amount must be a postive number!");
-        require(endTimeStamp > block.timestamp, "End Timestamp must be in the future.");
+        require(endTimeStamp > block.timestamp, "Resolution date must be in the future!");
+        require(num_participants >= 2, "Bet must have at least 2 participants!");
      
         // Prepare the condition
-        address oracle = msg.sender; 
-        uint256 outcome_slot_count = 2;
-        ctf.prepareCondition(oracle, questionId, outcome_slot_count);
+        ctf.prepareCondition(msg.sender, questionId, num_participants);
         // Probably should use the built-in function instead of computing it directly
         bytes32 conditionId = keccak256(abi.encodePacked(oracle, questionId, uint256(outcome_slot_count)));
 
         // Transfer the USDC from the creator's wallet (they need to call usdc.approve() first)
         usdc.transferFrom(msg.sender, address(this), amount); 
 
-        // Put the bet on the blockchain
-        bets[questionId] = Bet({
-            creator: msg.sender,
-            challenger: address(0),
-            amount: amount,
-            probability: probability,
-            startTimeStamp: block.timestamp,
-            endTimeStamp: endTimeStamp,
-            conditionId: conditionId,
-            status: BetStatus.Open,
-            creatorPosition: false,
-            challengerPosition: false
-        });
+        // Retrieve the bet struct from storage to save gas
+        Bet storage bet = bets[questionId];
+            
+        // Add fields to the bet struct
+        bet.num_participants = num_participants;
+        bets.amount = amount;
+        bet.probability = probability;
+        bet.startTimeStamp = block.timestamp;
+        bet.endTimeStamp = endTimeStamp;
+        bet.conditionId = conditionId;
+        bet.status = BetStatus.Open;
 
-        emit BetCreated(questionId, msg.sender, amount, endTimeStamp);
+        // Add the first participant (creator) and their null vote
+        bet.participants.push(msg.sender);
+        bet.outcomePositions.push(0);
+
+        emit BetCreated(questionId, msg.sender, amount, num_participants, endTimeStamp);
     }
 
     function challengeBet(bytes32 questionId) external {
         Bet storage bet = bets[questionId];
         require(bet.status == BetStatus.Open, "Bet is already taken!");
+        require(bet.participants.length < num_participants, "Bet has no more room for additional particpants!");
 
-        uint256 pot = (bet.amount * 10**18) / bet.probability;
+        // Use the probability field only if the it is 1-1 bet, otherwise it's even (1/n)
+        uint256 probability;
+        if (bet.num_participants == 2) {
+            probability = bet.probability;
+        } else {
+            probability = 1 / num_participants;
+        }
+
+        uint256 pot = (bet.amount * 10**18) / probability;
         uint256 challengerAmount = pot - bet.amount;
         
         // Take money from the joiner
@@ -97,6 +105,8 @@ contract Gambit is ERC1155Holder {
         // Update the bet status
         bet.status = BetStatus.Challenged;
         bet.challenger = msg.sender;
+
+
         emit BetChallenged(questionId, msg.sender);
     }
 
