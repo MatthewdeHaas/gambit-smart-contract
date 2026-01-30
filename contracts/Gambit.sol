@@ -50,6 +50,7 @@ contract Gambit is ERC1155Holder {
 
     // Mapping (dictionary) with key questionId and value Bet struct
     mapping(bytes32 => Bet) public bets;
+    mapping(bytes32 => bytes32) public assertionsToQuestions;
 
     function createBet(uint256 amount, uint256 probability, bytes32 questionId, uint256 endTimeStamp) external {
         require(probability > 0 && probability < 10**18, "Invalid probability");
@@ -196,7 +197,7 @@ contract Gambit is ERC1155Holder {
         usdc.transfer(msg.sender, address(this), bond)
 
         // Define the question for the oracle
-        bytes memory ancillaryData = abi.encodePacked("Did ", claimedWinner == BetPosition.For ? "Creator" : "Challenger", " win?");
+        bytes memory ancillaryData = abi.encodePacked("Did ", allegedWinningPosition == BetPosition.For ? "Creator" : "Challenger", " win?");
 
         // Ask the oracle
         oo.assertTruth(
@@ -214,16 +215,23 @@ contract Gambit is ERC1155Holder {
 
     // Called by OO when the assertion is settled
     function assertionResolvedCallback(bytes32 assertionId, bool assertedTruthfully) public {
-        require(msg.sender == address(oo), "Only OO can call");
+        require(msg.sender == address(oo), "Only OO can hit the callback!");
 
-        bytes32 questionId = assertionIdToQuestionId[assertionId];
+        bytes32 questionId = assertionsToQuestions[assertionId];
         Bet storage bet = bets[questionId];
 
+ 
+        // Either do the opposite, or just reject the claim and leave as disputed
         if (assertedTruthfully) {
-            _finalizeSettlement(questionId, bet.claimedWinner);
+            _finalizeSettlementConflict(questionId, bet.claimedWinner);
         } else {
             continue;
         }
+    }
+
+    function _finalizeSettlement(bytes32 questionId, BetPosition confirmedWinningPosition) private {
+        require(msg.sender == address(this), "Only contract can finalize a settlement!");
+        require(confirmedWinningPosition != BetPosition.Undecided, "Invalid winning position!");
     }
 
 }
