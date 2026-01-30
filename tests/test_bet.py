@@ -45,12 +45,22 @@ def test_bet():
     print("Creating bet...")
     usdc.approve(gambit.address, amount, sender=user_a, gas_limit=2000000)
     gambit.createBet(amount, prob, question_id, end_timestamp, sender=user_a, gas_limit=2000000)
+
+    bet = gambit.bets(question_id)
+    assert bet.status == 0, f"Expected status 1, but got {bet.status}"
+    assert bet.creator == user_a.address, f"Expected creator address {user_a.address}, but got {bet.creator}"
+
     print("✅ Bet created!")
 
     # Challenge bet
     print("Challenging bet...")
     usdc.approve(gambit.address, 15 * 10**6, sender=user_b, gas_limit=2000000)
     gambit.challengeBet(question_id, sender=user_b, gas_limit=2000000)
+
+    bet = gambit.bets(question_id)
+    assert bet.status == 1, f"Expected status 1, but got {bet.status}"
+    assert bet.challenger == user_b.address, f"Expected challenger address {user_b.address}, but got {bet.challenger}"
+
     print("✅ Bet challenged!")
 
     # Ensure balances are reduced
@@ -61,6 +71,10 @@ def test_bet():
     # Accept bet
     print("Confirming bet...") 
     gambit.confirmChallenge(question_id, True, sender=user_a, gas_limit=2000000)
+
+    bet = gambit.bets(question_id)
+    assert bet.status == 2, f"Expected status 2, but got {bet.status}"
+
     print("✅ Bet Accepted!")
 
 
