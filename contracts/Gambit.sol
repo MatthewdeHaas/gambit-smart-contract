@@ -15,140 +15,159 @@ contract Gambit is ERC1155Holder {
     IERC20 public usdc;
     OptimisticOracleV3Interface public immutable oo;
     bytes32 public immutable defaultIdentifier;
+    uint256 maxBetParticipants;
 
-    constructor(address _ctfAddress, address _usdcAddress) {
+    constructor(address _ctfAddress, address _usdcAddress, uint256 _maxBetParticipants) {
         ctf = IConditionalTokens(_ctfAddress);
         usdc = IERC20(_usdcAddress);
         oo = OptimisticOracleV3Interface(_oo); 
         defaultIdentifier = oo.defaultIdentifier();
+        maxBetParticipants = _maxBetParticipants;
+        usdc.approve(address(ctf), type(uint256).max);
     }
 
     // Enums for convenience/readability
-    enum BetStatus { Open, Challenged, Ongoing, Resolved, Disupted, Cancelled }
+    enum BetStatus { Accepting, Locked, Active, Resolved, Disupted, Cancelled }
 
-    // Bet data
+   // Bet data
     struct Bet {
         address[] participants;
-        uint256 num_participants;
+        uint numParticipants;
         uint256 amount;
-        uint256 probability; // Special case for 1-1 bets
         uint256 startTimeStamp;
         uint256 endTimeStamp;
         bytes32 conditionId;
         BetStatus status;
-        uint256[] outcomePositions;
     }
 
-    // Mapping (dictionary) with key questionId and value Bet struct
+    // Metadata tracker
     mapping(bytes32 => Bet) public bets;
+
+    // Participant data
+    mapping(bytes32 => mapping(address => bool)) isInvited;
+    mapping(bytes32 => mapping(address => uint256)) participantProbability;
+    mapping(bytes32 => mapping(address => address)) outcomeVote;
+
+    // Global probability mappings for quick lookups
+    mapping(bytes32 => mapping(uint256 => bool)) public probabilityExists;
+    mapping(bytes32 => mapping(uint256 => bool)) public probilityTaken;
+
+    // OO mapping
     mapping(bytes32 => bytes32) public assertionsToQuestions;
 
     // Cheap transactions sent over the blockchain to broadcast important events
-    event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, uint256 num_participants, uint256 endTimeStamp);
-    event BetChallenged(bytes32 indexed questionId, address indexed challenger);
-    event BetConfirmed(bytes32 indexed questionId, address indexed creator, bool indexed accepted);
+    event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, indexed uint256 startTimeStamp, indexed uint256 endTimeStamp);
+    event BetJoined(bytes32 indexed questionId, address indexed joiner, uint256 indexed probability);
+    event BetStarted(bytes32 indexed questionId);
     event BetResolved(bytes indexed questionId, address indexed participant, BetPosition indexed outcome);
     event BetDisputed(bytes32 indexed, address indexed disputer);
 
-    function createBet(uint256 amount, uint256 probability, bytes32 questionId, uint256 num_participants, uint256 endTimeStamp) external {
-        require(probability > 0 && probability < 10**18, "Invalid probability");
+    function createBet(bytes32 questionId, uint256 amount, uint256[] calldata probabilities, address[] calldata challengers, uint256 endTimeStamp) external {
+        require(bets[questionId].startTimeStamp == 0, "Bet already exists!");
         require(amount > 0, "Amount must be a postive number!");
         require(endTimeStamp > block.timestamp, "Resolution date must be in the future!");
-        require(num_participants >= 2, "Bet must have at least 2 participants!");
-     
-        // Prepare the condition
-        ctf.prepareCondition(msg.sender, questionId, num_participants);
-        // Probably should use the built-in function instead of computing it directly
-        bytes32 conditionId = keccak256(abi.encodePacked(oracle, questionId, uint256(outcome_slot_count)));
+        require(challengers.length > 1 && challengers.length <= maxParticipants, "Invalid number of participants!");
+        require(probabilities.length == challengers.length, "Incorrect number of probabilities specified!");
+        uint256 probSum = 0;
+        for (uint256 i = 0; i < probabilities.length; i++) {
+            uint256 p = probabilities[i];
+
+            require(p > 0 && p < 1e18, "Invalid probability");
+            require(!probabilitytaken[questionId][p]);
+
+            probabilityExists[questionId][p] = true;
+                
+            probSum += p;
+        }
+        require(probSum < 1e18, "Probabilities must sum to 1!"); 
 
         // Transfer the USDC from the creator's wallet (they need to call usdc.approve() first)
-        usdc.transferFrom(msg.sender, address(this), amount); 
+        usdc.transferFrom(msg.sender, address(this), amount);
 
         // Retrieve the bet struct from storage to save gas
         Bet storage bet = bets[questionId];
             
         // Add fields to the bet struct
-        bet.num_participants = num_participants;
-        bets.amount = amount;
-        bet.probability = probability;
+        bet.numParticipants = challengers.length + 1;
+        bet.amount = amount;
         bet.startTimeStamp = block.timestamp;
         bet.endTimeStamp = endTimeStamp;
-        bet.conditionId = conditionId;
-        bet.status = BetStatus.Open;
+        bet.status = BetStatus.Accepting;
 
-        // Add the first participant (creator) and their null vote
-        bet.participants.push(msg.sender);
-        bet.outcomePositions.push(0);
+        bet.participants.push(msg.sender); 
 
-        emit BetCreated(questionId, msg.sender, amount, num_participants, endTimeStamp);
-    }
+        uint256 creatorProb = 1e18 - probSum;
+        participantProbability[questionId][msg.sender] = creatorProb;
+        probabilityTaken[questionId][creatorProb] = true;
 
-    function challengeBet(bytes32 questionId) external {
-        Bet storage bet = bets[questionId];
-        require(bet.status == BetStatus.Open, "Bet is already taken!");
-        require(bet.participants.length < num_participants, "Bet has no more room for additional particpants!");
+        outcomeVote[questionId][msg.sender] = address(0);
 
-        // Use the probability field only if the it is 1-1 bet, otherwise it's even (1/n)
-        uint256 probability;
-        if (bet.num_participants == 2) {
-            probability = bet.probability;
-        } else {
-            probability = 1 / num_participants;
+        // Add the participating and probability mappings 
+        for (uint256 i = 0; i < challengers.length; i++) {
+           isInvited[questionId][challengers[i]] = true;
+           probabilityExists[questionId][probability[i]] = true;
         }
 
-        uint256 pot = (bet.amount * 10**18) / probability;
-        uint256 challengerAmount = pot - bet.amount;
-        
+        emit BetCreated(questionId, msg.sender, amount, block.timestamp, endTimeStamp);
+    }
+
+    function joinBet(bytes32 questionId, uint256 probability) external {
+        Bet storage bet = bets[questionId];
+        require(bet.status == BetStatus.Accepting, "Bet is already taken!");
+        require(isInvited[questionId][msg.sender], "You are not able to join this bet!");
+        require(participantProbability[questionId][msg.sender] == 0, "You cannot join a more than once!");
+        require(probabilityExists[questionId][probability], "Invalid probability!");
+        require(!probabilityTaken[questionId][probability], "Participant already claimed this probability!");
+
+        uint256 creatorProb = participantProbability[questionId][msg.sender];
+        uint256 joinAmount = (bet.amount * probability) / creatorProb;
+   
         // Take money from the joiner
-        usdc.transferFrom(msg.sender, address(this), challengerAmount);
+        usdc.transferFrom(msg.sender, address(this), joinAmount);
 
         // Update the bet status
-        bet.status = BetStatus.Challenged;
-        bet.challenger = msg.sender;
+        bet.participants.push(msg.sender);
+        outcomeVote[questionId][msg.sender] = address(0);
+        joinedBet[questionId][msg.sender] = true;
 
+        participantProbability[questionId][msg.sender] = probability;
+        probabilityTaken[questionId][probability] = true;
 
-        emit BetChallenged(questionId, msg.sender);
+        // Change the status based on whether the bet is full
+        if (bet.participants.length == bet.numParticipants) {
+            _startBet(questionId);
+        }
+        emit BetJoined(questionId, msg.sender, probability);
     }
 
-    function confirmChallenge(bytes32 questionId, bool accepted) external {
+    function _startBet(bytes32 questionId) internal {
         Bet storage bet = bets[questionId];
-        require(bet.status == BetStatus.Challenged, "Bet has not been challenged or has already been confirmed!");
-        require(msg.sender == bet.creator, "A bet can only be confirmed by its creator!");
+        uint256 pot = (bet.amount * 1e18) / participantProbability[questionId][bet.participants[0]];
+            
+        // Prepare the condition
+        ctf.prepareCondition(address(this), questionId, bet.numParticipants);
+        bytes32 conditionId = ctf.getConditionId(msg.sender, questionId, participants.length) 
+        bet.conditionId = conditionId;
 
-        uint256 pot = (bet.amount * 10**18) / bet.probability;
-
-        if (accepted) {
-            // Allow the CTF to take the pot as collateral
-            usdc.approve(address(ctf), pot);
-
-            // Split the collateralized tokens
-            uint256[] memory partition = new uint256[](2);
-            partition[0] = 1; // YES
-            partition[1] = 2; // NO
-            ctf.splitPosition(address(usdc), bytes32(0), bet.conditionId, partition, pot);
-
-            // Mint the tokens
-            bytes32 yesCollectionId = ctf.getCollectionId(bytes32(0), bet.conditionId, 1);
-            bytes32 noCollectionId = ctf.getCollectionId(bytes32(0), bet.conditionId, 2); 
-            uint256 yesTokenId = uint256(keccak256(abi.encodePacked(address(usdc), yesCollectionId)));
-            uint256 noTokenId = uint256(keccak256(abi.encodePacked(address(usdc), noCollectionId)));
-
-            // Send YES to Creator, NO to Challenger
-            ctf.safeTransferFrom(address(this), bet.creator, yesTokenId, pot, "");
-            ctf.safeTransferFrom(address(this), bet.challenger, noTokenId, pot, "");
-
-            bet.status = BetStatus.Ongoing;
-        } else {
-            // Refund the challenger
-            uint256 challengerAmount = pot - bet.amount;
-            usdc.transfer(bet.challenger, challengerAmount);
-
-            // Revert the bet back to its original initial state
-            bet.status = BetStatus.Open;
-            bet.challenger = address(0);
+        // Assign non-overlapping indices to the conditional tokens
+        uint256 numParticipants = bet.numParticipants;
+        uint256[] memory partition = new uint256[](n);
+        for (uint256 i = 0; i < numParticipants; i++) {
+            partition[i] = 1 << i;
         }
 
-        emit BetConfirmed(questionId, msg.sender, accepted); 
+        // Mint the tokens
+        ctf.splitPosition(address(usdc), bytes32(0), conditionId, partition, pot);
+
+        // Send the participants their respective conditional tokens
+        for (uint i = 0; i < numParticipants; i++) {
+            bytes32 collectionId = ctf.getCollectionId(bytes32(0), conditionId, 1 << i);
+            uint256 conditionalTokenId = uint256(keccak256(abi.encodePacked(address(usdc), collectionId)))
+            ctf.safeTransferFrom(address(this), participants[i], conditionalTokenId, pot, "");
+        }
+
+        bet.status = BetStatus.Active;
+        emit BetStarted(questionId); 
     }
 
     // Users will send their settlement direction here

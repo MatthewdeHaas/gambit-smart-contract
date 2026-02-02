@@ -33,7 +33,7 @@ def test_bet_1_vs_1():
     initial_balance_b = usdc.balanceOf(user_b.address)
 
     # Deploy the smart contract
-    gambit = user_a.deploy(project.Gambit, CTF_ADDRESS, USDC_ADDRESS, gas_limit=2000000)
+    gambit = user_a.deploy(project.Gambit, CTF_ADDRESS, USDC_ADDRESS, 16, gas_limit=2000000)
 
     # Define everything
     question_id = os.urandom(32)
@@ -44,7 +44,7 @@ def test_bet_1_vs_1():
     # Create bet
     print("Creating bet...")
     usdc.approve(gambit.address, amount, sender=user_a, gas_limit=2000000)
-    gambit.createBet(amount, prob, question_id, num_participants, end_timestamp, sender=user_a, gas_limit=2000000)
+    gambit.createBet(amount, [prob], question_id, [user_b.address], end_timestamp, sender=user_a, gas_limit=2000000)
 
     bet = gambit.bets(question_id)
     assert bet.status == 0, f"Expected status 1, but got {bet.status}"
@@ -55,7 +55,7 @@ def test_bet_1_vs_1():
     # Challenge bet
     print("Challenging bet...")
     usdc.approve(gambit.address, 15 * 10**6, sender=user_b, gas_limit=2000000)
-    gambit.challengeBet(question_id, sender=user_b, gas_limit=2000000)
+    gambit.joinBet(question_id, sender=user_b, gas_limit=2000000)
 
     bet = gambit.bets(question_id)
     assert bet.status == 1, f"Expected status 1, but got {bet.status}"
