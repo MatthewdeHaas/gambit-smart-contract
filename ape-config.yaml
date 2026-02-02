@@ -8,12 +8,22 @@ ethereum:
 hardhat:
   hardhat_config_file: ./hardhat.config.js
 
+dependencies:
+  - name: OpenZeppelin
+    npm: "@openzeppelin/contracts"
+    version: 5.0.0
+  - name: UMA
+    npm: "@uma/core"
+    version: 3.1.0
+
 solidity:
   version: 0.8.28
   import_remapping:
-    - "hardhat/=./node_modules/hardhat/"
+    - "@openzeppelin/contracts=OpenZeppelin"
+    - "@uma/core=UMA"
 
-dependencies:
-  - name: openzeppelin
-    github: OpenZeppelin/openzeppelin-contracts
-    version: 5.0.0
+compile:
+  exclude:
+    - "**/build/**"
+    - "**/artifacts/**"
+    - "**/*.json"

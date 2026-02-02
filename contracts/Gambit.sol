@@ -2,10 +2,12 @@
 pragma solidity ^0.8.20;
 
 import "./IConditionalTokens.sol";
-import "./console.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
-import "@uma/core/contracts/optimistic-oracle-v3/interfaces/OptimisticOracleV3Interface.sol";
+import "./IOOV3.sol";
+// import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+// import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
+// import "@uma/core/contracts/optimistic-oracle-v3/interfaces/OptimisticOracleV3Interface.sol";
+import "./vendor/@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./vendor/@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
 
 contract Gambit is ERC1155Holder {
@@ -13,21 +15,21 @@ contract Gambit is ERC1155Holder {
     // Contract objects used throughout the contract, defined when the object is created
     IConditionalTokens public ctf;
     IERC20 public usdc;
-    OptimisticOracleV3Interface public immutable oo;
+    IOOV3 public immutable oo;
     bytes32 public immutable defaultIdentifier;
     uint256 maxBetParticipants;
 
-    constructor(address _ctfAddress, address _usdcAddress, uint256 _maxBetParticipants) {
+    constructor(address _ctfAddress, address _usdcAddress, address _ooAddress, uint256 _maxBetParticipants) {
         ctf = IConditionalTokens(_ctfAddress);
         usdc = IERC20(_usdcAddress);
-        oo = OptimisticOracleV3Interface(_oo); 
+        oo = IOOV3(_ooAddress); 
         defaultIdentifier = oo.defaultIdentifier();
         maxBetParticipants = _maxBetParticipants;
         usdc.approve(address(ctf), type(uint256).max);
     }
 
     // Enums for convenience/readability
-    enum BetStatus { Accepting, Locked, Active, Resolving, Resolved, Disupted, Escalated, Cancelled }
+    enum BetStatus { Accepting, Locked, Active, Resolving, Resolved, Disputed, Escalated, Cancelled }
 
    // Bet data
     struct Bet {
@@ -48,38 +50,38 @@ contract Gambit is ERC1155Holder {
     mapping(bytes32 => mapping(address => uint256)) participantIndex;
     mapping(bytes32 => mapping(address => bool)) isInvited;
     mapping(bytes32 => mapping(address => uint256)) participantProbability;
-    // mapping(bytes32 => mapping(address => address)) outcomeVote;
+    mapping(bytes32 => mapping(address => address)) outcomeVote;
     mapping(bytes32 => mapping(address => uint256)) outcomeVoteCount; // number of votes an address has
     mapping(bytes32 => address) leadingCandidate; // The address of the leading candidate
     mapping(bytes32 => address) assertionWinner;
 
     // Global probability mappings for quick lookups
     mapping(bytes32 => mapping(uint256 => bool)) public probabilityExists;
-    mapping(bytes32 => mapping(uint256 => bool)) public probilityTaken;
+    mapping(bytes32 => mapping(uint256 => bool)) public probabilityTaken;
 
     // OO mapping
     mapping(bytes32 => bytes32) public assertionToQuestion;
 
     // Cheap transactions sent over the blockchain to broadcast important events
-    event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, indexed uint256 startTimeStamp, indexed uint256 endTimeStamp);
+    event BetCreated(bytes32 indexed questionId, uint256 amount, uint256 indexed endTimeStamp);
     event BetJoined(bytes32 indexed questionId, address indexed joiner, uint256 indexed probability);
     event BetStarted(bytes32 indexed questionId);
-    event BetResolved(bytes indexed questionId, address indexed winner);
-    event BetDisputed(bytes32 indexed questionId, address indexed disputer);
+    event BetResolved(bytes32 indexed questionId, address indexed winner);
+    event BetDisputed(bytes32 indexed questionId);
     event BetEscalated(bytes32 indexed questionId, address indexed escalator);
 
     function createBet(bytes32 questionId, uint256 amount, uint256[] calldata challengerProbabilities, address[] calldata challengers, uint256 endTimeStamp) external {
         require(bets[questionId].startTimeStamp == 0, "Bet already exists!");
         require(amount > 0, "Amount must be a postive number!");
         require(endTimeStamp > block.timestamp, "Resolution date must be in the future!");
-        require(challengers.length > 1 && challengers.length <= maxParticipants, "Invalid number of participants!");
+        require(challengers.length > 1 && challengers.length <= maxBetParticipants - 1, "Invalid number of participants!");
         require(challengerProbabilities.length == challengers.length, "Incorrect number of probabilities specified!");
         uint256 probSum = 0;
         for (uint256 i = 0; i < challengerProbabilities.length; i++) {
             uint256 p = challengerProbabilities[i];
 
             require(p > 0 && p < 1e18, "Invalid probability");
-            require(!probabilitytaken[questionId][p]);
+            require(!probabilityTaken[questionId][p]);
 
             probabilityExists[questionId][p] = true;
                 
@@ -115,7 +117,7 @@ contract Gambit is ERC1155Holder {
            probabilityExists[questionId][challengerProbabilities[i]] = true;
         }
 
-        emit BetCreated(questionId, msg.sender, amount, block.timestamp, endTimeStamp);
+        emit BetCreated(questionId, amount, endTimeStamp);
     }
 
     function joinBet(bytes32 questionId, uint256 probability) external {
@@ -136,7 +138,6 @@ contract Gambit is ERC1155Holder {
         bet.participants.push(msg.sender);
         participantIndex[questionId][msg.sender] = bet.participants.length;
         outcomeVote[questionId][msg.sender] = address(0);
-        joinedBet[questionId][msg.sender] = true;
 
         participantProbability[questionId][msg.sender] = probability;
         probabilityTaken[questionId][probability] = true;
@@ -154,12 +155,12 @@ contract Gambit is ERC1155Holder {
             
         // Prepare the condition
         ctf.prepareCondition(address(this), questionId, bet.numParticipants);
-        bytes32 conditionId = ctf.getConditionId(msg.sender, questionId, participants.length) 
+        bytes32 conditionId = ctf.getConditionId(address(this), questionId, bet.participants.length); 
         bet.conditionId = conditionId;
 
         // Assign non-overlapping indices to the conditional tokens
         uint256 numParticipants = bet.numParticipants;
-        uint256[] memory partition = new uint256[](n);
+        uint256[] memory partition = new uint256[](numParticipants);
         for (uint256 i = 0; i < numParticipants; i++) {
             partition[i] = 1 << i;
         }
@@ -170,8 +171,8 @@ contract Gambit is ERC1155Holder {
         // Send the participants their respective conditional tokens
         for (uint i = 0; i < numParticipants; i++) {
             bytes32 collectionId = ctf.getCollectionId(bytes32(0), conditionId, 1 << i);
-            uint256 conditionalTokenId = uint256(keccak256(abi.encodePacked(address(usdc), collectionId)))
-            ctf.safeTransferFrom(address(this), participants[i], conditionalTokenId, pot, "");
+            uint256 conditionalTokenId = uint256(keccak256(abi.encodePacked(address(usdc), collectionId)));
+            ctf.safeTransferFrom(address(this), bet.participants[i], conditionalTokenId, pot, "");
         }
 
         bet.status = BetStatus.Active;
@@ -181,7 +182,7 @@ contract Gambit is ERC1155Holder {
     function voteOnOutcome(bytes32 questionId, address vote) external {
         Bet storage bet = bets[questionId];
         // Storage costs relatively more gas, so only store if you need to
-        if (block.timeStamp > bet.endTimeStamp && bet.status == BetStatus.Active) {
+        if (block.timestamp > bet.endTimeStamp && bet.status == BetStatus.Active) {
             bet.status = BetStatus.Resolving;
         }
         require(bet.status == BetStatus.Resolving, "Bet is not currently being resolved!");
@@ -189,6 +190,7 @@ contract Gambit is ERC1155Holder {
         require(participantProbability[questionId][vote] > 0, "User voted for was not part of the bet!");
         
         // Record the user's vote
+        outcomeVote[questionId][msg.sender] = vote;
         outcomeVoteCount[questionId][vote]++;
         bet.voteCount++;
 
@@ -204,15 +206,15 @@ contract Gambit is ERC1155Holder {
 
         // If > 50% of votes go to one address, that address wins
         if (2 * leaderVotes > bet.numParticipants) {
-            _valueTokens(questionId, bet, winner);
+            _valueTokens(questionId, bet, leader);
         } else if (2 * (leaderVotes + remainingVotes) <= bet.numParticipants) { // If the leader cannot reach 50%, raise a dispute
-            bet.status = BetStatus.dipsuted;
+            bet.status = BetStatus.Disputed;
             emit BetDisputed(questionId);
         }
     }
 
 
-    function _valueTokens(bytes32 questionId, Bet bet, address winner) internal {
+    function _valueTokens(bytes32 questionId, Bet storage bet, address winner) internal {
         // Recall that this mapping is 1-based to avoid confusing index zero and an empty value
         uint256 winnerIndex = participantIndex[questionId][winner] - 1;
         require(winnerIndex > 0 && winnerIndex <= bet.numParticipants, "Winner not in the participants array!");
@@ -225,13 +227,13 @@ contract Gambit is ERC1155Holder {
         emit BetResolved(questionId, winner);
     }
 
-    function escalateToUMA(bytes32 questionId, BetPosition allegedWinner) external {
+    function escalateToUMA(bytes32 questionId, address allegedWinner) external {
         Bet storage bet = bets[questionId];
-        require(probabilityParticipant[questionId][msg.sender] > 0, "Not involed in the bet!");
+        require(participantProbability[questionId][msg.sender] > 0, "Not involed in the bet!");
 
         // Transfer the bond for escalating
         uint256 bond = oo.getMinimumBond(address(usdc));
-        usdc.transfer(msg.sender, address(this), bond)
+        usdc.transferFrom(msg.sender, address(this), bond);
 
         // Define the question for the oracle
         bytes memory ancillaryData = abi.encodePacked(
@@ -246,13 +248,14 @@ contract Gambit is ERC1155Holder {
             address(this),     // Callback recipient
             address(0),        // No sovereign aid
             7200,              // Liveness period (2 hours)
-            address(usdc),     // Bond currency
+            usdc,     // Bond currency
             bond,
             "ASSERT_TRUTH",    // Standard identifier
             0                  // No reward
         );
 
         assertionToQuestion[assertionId] = questionId;
+        // Used to determine who gets the tokens
         assertionWinner[assertionId] = allegedWinner;
         bet.status = BetStatus.Escalated;
         emit BetEscalated(questionId, msg.sender);
@@ -261,18 +264,15 @@ contract Gambit is ERC1155Holder {
     // Called by OO when the assertion is settled
     function assertionResolvedCallback(bytes32 assertionId, bool assertedTruthfully) external {
         require(msg.sender == address(oo), "Only OO can hit the callback!");
-        Bet storage bet = bets[assertionToQuestion[assertionId]];
+        bytes32 questionId = assertionToQuestion[assertionId];
+        Bet storage bet = bets[questionId];
  
         if (assertedTruthfully) {
-            _valueTokens(questionId, bet, address(0));
+            _valueTokens(questionId, bet, assertionWinner[assertionId]);
         } else {
             bet.status = BetStatus.Disputed;
+            assertionWinner[assertionId] = address(0);
         }
-    }
-
-    function _finalizeSettlement(bytes32 questionId, BetPosition confirmedWinningPosition) private {
-        require(msg.sender == address(this), "Only contract can finalize a settlement!");
-        require(confirmedWinningPosition != BetPosition.Undecided, "Invalid winning position!");
     }
 
 }
