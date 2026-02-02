@@ -22,7 +22,7 @@ def test_bet_1_vs_1():
 
     # Define bet quantity
     amount = 10 * 10**6
-    prob = 40 * 10**16
+    prob = 60 * 10**16
 
     # Give test users some gas money
     for acct in [user_a, user_b]:
@@ -44,7 +44,10 @@ def test_bet_1_vs_1():
     # Create bet
     print("Creating bet...")
     usdc.approve(gambit.address, amount, sender=user_a, gas_limit=2000000)
-    gambit.createBet(amount, [prob], question_id, [user_b.address], end_timestamp, sender=user_a, gas_limit=2000000)
+    # probability and challenger lists are *not* parallel, but must be the same length
+    # Probabilities are the pool probabilities a user can choose. The creator's probability should not be included
+    # Challengers are the allowed permitted, limited to length 15. If it's empty, 
+    gambit.createBet(amount, [challengerProb], question_id, [user_b.address], end_timestamp, sender=user_a, gas_limit=2000000)
 
     bet = gambit.bets(question_id)
     assert bet.status == 0, f"Expected status 1, but got {bet.status}"

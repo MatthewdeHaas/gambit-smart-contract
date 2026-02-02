@@ -27,7 +27,7 @@ contract Gambit is ERC1155Holder {
     }
 
     // Enums for convenience/readability
-    enum BetStatus { Accepting, Locked, Active, Resolved, Disupted, Cancelled }
+    enum BetStatus { Accepting, Locked, Active, Resolving, Resolved, Disupted, Cancelled }
 
    // Bet data
     struct Bet {
@@ -38,15 +38,19 @@ contract Gambit is ERC1155Holder {
         uint256 endTimeStamp;
         bytes32 conditionId;
         BetStatus status;
+        uint256 voteCount;
     }
 
     // Metadata tracker
     mapping(bytes32 => Bet) public bets;
 
     // Participant data
+    mapping(bytes32 => mapping(address => uint256)) participantIndex;
     mapping(bytes32 => mapping(address => bool)) isInvited;
     mapping(bytes32 => mapping(address => uint256)) participantProbability;
-    mapping(bytes32 => mapping(address => address)) outcomeVote;
+    // mapping(bytes32 => mapping(address => address)) outcomeVote;
+    mapping(bytes32 => mapping(address => uint256)) outcomeVoteCount; // number of votes an address has
+    mapping(bytes32 => address) leadingCandidate; // The address of the leading candidate
 
     // Global probability mappings for quick lookups
     mapping(bytes32 => mapping(uint256 => bool)) public probabilityExists;
@@ -59,18 +63,18 @@ contract Gambit is ERC1155Holder {
     event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, indexed uint256 startTimeStamp, indexed uint256 endTimeStamp);
     event BetJoined(bytes32 indexed questionId, address indexed joiner, uint256 indexed probability);
     event BetStarted(bytes32 indexed questionId);
-    event BetResolved(bytes indexed questionId, address indexed participant, BetPosition indexed outcome);
+    event BetResolved(bytes indexed questionId, address indexed winner);
     event BetDisputed(bytes32 indexed, address indexed disputer);
 
-    function createBet(bytes32 questionId, uint256 amount, uint256[] calldata probabilities, address[] calldata challengers, uint256 endTimeStamp) external {
+    function createBet(bytes32 questionId, uint256 amount, uint256[] calldata challengerProbabilities, address[] calldata challengers, uint256 endTimeStamp) external {
         require(bets[questionId].startTimeStamp == 0, "Bet already exists!");
         require(amount > 0, "Amount must be a postive number!");
         require(endTimeStamp > block.timestamp, "Resolution date must be in the future!");
         require(challengers.length > 1 && challengers.length <= maxParticipants, "Invalid number of participants!");
-        require(probabilities.length == challengers.length, "Incorrect number of probabilities specified!");
+        require(challengerProbabilities.length == challengers.length, "Incorrect number of probabilities specified!");
         uint256 probSum = 0;
-        for (uint256 i = 0; i < probabilities.length; i++) {
-            uint256 p = probabilities[i];
+        for (uint256 i = 0; i < challengerProbabilities.length; i++) {
+            uint256 p = challengerProbabilities[i];
 
             require(p > 0 && p < 1e18, "Invalid probability");
             require(!probabilitytaken[questionId][p]);
@@ -81,31 +85,32 @@ contract Gambit is ERC1155Holder {
         }
         require(probSum < 1e18, "Probabilities must sum to 1!"); 
 
-        // Transfer the USDC from the creator's wallet (they need to call usdc.approve() first)
+        // Transfer the USDC from the creator's wallet
         usdc.transferFrom(msg.sender, address(this), amount);
 
         // Retrieve the bet struct from storage to save gas
         Bet storage bet = bets[questionId];
             
         // Add fields to the bet struct
+        bet.participants.push(msg.sender); 
         bet.numParticipants = challengers.length + 1;
         bet.amount = amount;
         bet.startTimeStamp = block.timestamp;
         bet.endTimeStamp = endTimeStamp;
         bet.status = BetStatus.Accepting;
-
-        bet.participants.push(msg.sender); 
+        bet.voteCount = 0;
 
         uint256 creatorProb = 1e18 - probSum;
+        participantIndex[questionId][msg.sender] = 1; // Use 1-based indexing so the empty value (zero) is not confused with the creator
         participantProbability[questionId][msg.sender] = creatorProb;
         probabilityTaken[questionId][creatorProb] = true;
 
         outcomeVote[questionId][msg.sender] = address(0);
 
-        // Add the participating and probability mappings 
+        // Add the invitation and probability mappings 
         for (uint256 i = 0; i < challengers.length; i++) {
            isInvited[questionId][challengers[i]] = true;
-           probabilityExists[questionId][probability[i]] = true;
+           probabilityExists[questionId][challengerProbabilities[i]] = true;
         }
 
         emit BetCreated(questionId, msg.sender, amount, block.timestamp, endTimeStamp);
@@ -127,6 +132,7 @@ contract Gambit is ERC1155Holder {
 
         // Update the bet status
         bet.participants.push(msg.sender);
+        participantIndex[questionId][msg.sender] = bet.participants.length;
         outcomeVote[questionId][msg.sender] = address(0);
         joinedBet[questionId][msg.sender] = true;
 
@@ -170,56 +176,51 @@ contract Gambit is ERC1155Holder {
         emit BetStarted(questionId); 
     }
 
-    // Users will send their settlement direction here
-    // If they agree, money is sent to the winner
-    // If there is a conflict, use the UMA Optimistic Oracle as a court of appeal
-    function settleBet(bytes32 questionId, BetPosition position) external {
+    function voteOnOutcome(bytes32 questionId, address vote) external {
         Bet storage bet = bets[questionId];
-        require(bet.status == BetStatus.Ongoing, "Bet is not live anymore!");    
-        require(block.timestamp > bet.endTimeStamp, "Bet has not reached its end date yet!");
-        require(msg.sender == bet.creator || msg.sender == bet.challenger, "Only the involved parties can settle!");
-        require(
-            (msg.sender == bet.creator && bet.creatorPosition != BetPosition.Undecided) ||
-            (msg.sender == bet.challenger && bet.challengerPosition != BetPosition.Undecided), 
-            "Aready took a position!"
-        );
-        require(position == BetPosition.For || position == BetPosiiton.Against, "Provided position is invalid!");
+        // Storage costs relatively more gas, so only store if you need to
+        if (block.timeStamp > bet.endTimeStamp && bet.status == BetStatus.Active) {
+            bet.status = BetStatus.Resolving;
+        }
+        require(bet.status == BetStatus.Resolving, "Bet is not currently being resolved!");
+        require(outcomeVote[questionId][msg.sender] == address(0), "You cannot vote twice!");
+        require(participantProbability[questionId][vote] > 0, "User voted for was not part of the bet!");
+        
+        // Record the user's vote
+        outcomeVoteCount[questionId][vote]++;
+        bet.voteCount++;
 
-        // Update the sender's position
-        if (msg.sender == bet.creator) {
-            bet.creatorPosition = position;
-        } else {
-            bet.challengerPosition = position;
+        // Check if the leading candidate changed
+        address leader = leadingCandidate[questionId];
+        if (outcomeVoteCount[questionId][vote] > outcomeVoteCount[questionId][leader]) {
+            leadingCandidate[questionId] = vote;
+            leader = vote;
         }
 
-        // Both parties have taken a position
-        if (bet.creatorPostion != BetPosition.Undecided && bet.challengerPosition != BetPosition.Undecided) {
+        uint256 leaderVotes = outcomeVoteCount[questionId][leader];
+        uint256 remainingVotes = bet.numParticipants - bet.voteCount;
 
-            // Both parties have agreed on the matter
-            if (bet.creatorPosition == bet.challengerPosition) {
-                uint256 memory payout = new uint256[](2);
+        // If > 50% of votes go to one address, that address wins
+        if (2 * leaderVotes > bet.numParticipants) {
+            // Recall that this mapping is 1-based to avoid confusing index zero and an empty value
+            uint256 winnerIndex = participantIndex[questionId][winner] - 1;
+            require(winnerIndex > 0 && winnerIndex <= bet.numParticipants, "Winner not in the participants array!");
 
-                // Value the conditional tokens based on the agreed upon resolution
-                payout[0] = bet.creatorPosition == BetPosition.For ? 1 : 0;
-                payout[1] = 1 - payout[0];
+            uint256[] memory payouts = new uint256[](bet.numParticipants);
+            payouts[winnerIndex] = 1;
+            ctf.reportPayouts(bet.conditionId, payouts);
 
-                // Report the new value of the tokens to the CTF
-                ctf.reportPayouts(questionId, payout);   
-
-                bet.status == BetStatus.Resolved;
-                emit BetResolved(questionId, msg.sender, bet.creatorPosition);
-            } else { // Conflict
-                bet.status = BetStatus.Disputed;    
-                emit BetDisputed(questionId, msg.sender);
-            }
+            bet.status = BetStatus.Resolved;
+            emit BetResolved(questionId, winner);
+        } else if (2 * (leaderVotes + remainingVotes) <= bet.numParticipants) { // If the leader cannot reach 50%, raise a dispute
+            bet.status = BetStatus.dipsuted;
+            emit BetDisputed(questionId);
         }
     }
 
     function escalateToUMA(bytes32 questionId, BetPosition allegedWinningPosition) external payable {
         Bet storage bet = bets[questionId];
-        require(allegedWinningPosition != BetPosition.Undecided, "Cannot escalate an undecided outcome!")
-        require(msg.sender == bet.creator || msg.sender == bet.challenger, "Cannot escalate  on behalf of an involved party!");
-        require(bet.creatorPosition != bet.challengerPosiiton, "Cannot escalate an non-conflicting outcome!");
+        require(probabilityParticipant[questionId][msg.sender] > 0, "Not involed in the bet!");
 
         // Transfer the bond for escalating
         uint256 bond = oo.getMinimumBond(address(usdc));
