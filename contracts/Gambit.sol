@@ -27,7 +27,7 @@ contract Gambit is ERC1155Holder {
     }
 
     // Enums for convenience/readability
-    enum BetStatus { Accepting, Locked, Active, Resolving, Resolved, Disupted, Cancelled }
+    enum BetStatus { Accepting, Locked, Active, Resolving, Resolved, Disupted, Escalated, Cancelled }
 
    // Bet data
     struct Bet {
@@ -51,20 +51,22 @@ contract Gambit is ERC1155Holder {
     // mapping(bytes32 => mapping(address => address)) outcomeVote;
     mapping(bytes32 => mapping(address => uint256)) outcomeVoteCount; // number of votes an address has
     mapping(bytes32 => address) leadingCandidate; // The address of the leading candidate
+    mapping(bytes32 => address) assertionWinner;
 
     // Global probability mappings for quick lookups
     mapping(bytes32 => mapping(uint256 => bool)) public probabilityExists;
     mapping(bytes32 => mapping(uint256 => bool)) public probilityTaken;
 
     // OO mapping
-    mapping(bytes32 => bytes32) public assertionsToQuestions;
+    mapping(bytes32 => bytes32) public assertionToQuestion;
 
     // Cheap transactions sent over the blockchain to broadcast important events
     event BetCreated(bytes32 indexed questionId, address indexed creator, uint256 amount, indexed uint256 startTimeStamp, indexed uint256 endTimeStamp);
     event BetJoined(bytes32 indexed questionId, address indexed joiner, uint256 indexed probability);
     event BetStarted(bytes32 indexed questionId);
     event BetResolved(bytes indexed questionId, address indexed winner);
-    event BetDisputed(bytes32 indexed, address indexed disputer);
+    event BetDisputed(bytes32 indexed questionId, address indexed disputer);
+    event BetEscalated(bytes32 indexed questionId, address indexed escalator);
 
     function createBet(bytes32 questionId, uint256 amount, uint256[] calldata challengerProbabilities, address[] calldata challengers, uint256 endTimeStamp) external {
         require(bets[questionId].startTimeStamp == 0, "Bet already exists!");
@@ -202,23 +204,28 @@ contract Gambit is ERC1155Holder {
 
         // If > 50% of votes go to one address, that address wins
         if (2 * leaderVotes > bet.numParticipants) {
-            // Recall that this mapping is 1-based to avoid confusing index zero and an empty value
-            uint256 winnerIndex = participantIndex[questionId][winner] - 1;
-            require(winnerIndex > 0 && winnerIndex <= bet.numParticipants, "Winner not in the participants array!");
-
-            uint256[] memory payouts = new uint256[](bet.numParticipants);
-            payouts[winnerIndex] = 1;
-            ctf.reportPayouts(bet.conditionId, payouts);
-
-            bet.status = BetStatus.Resolved;
-            emit BetResolved(questionId, winner);
+            _valueTokens(questionId, bet, winner);
         } else if (2 * (leaderVotes + remainingVotes) <= bet.numParticipants) { // If the leader cannot reach 50%, raise a dispute
             bet.status = BetStatus.dipsuted;
             emit BetDisputed(questionId);
         }
     }
 
-    function escalateToUMA(bytes32 questionId, BetPosition allegedWinningPosition) external payable {
+
+    function _valueTokens(bytes32 questionId, Bet bet, address winner) internal {
+        // Recall that this mapping is 1-based to avoid confusing index zero and an empty value
+        uint256 winnerIndex = participantIndex[questionId][winner] - 1;
+        require(winnerIndex > 0 && winnerIndex <= bet.numParticipants, "Winner not in the participants array!");
+
+        uint256[] memory payouts = new uint256[](bet.numParticipants);
+        payouts[winnerIndex] = 1;
+        ctf.reportPayouts(bet.conditionId, payouts);
+
+        bet.status = BetStatus.Resolved;
+        emit BetResolved(questionId, winner);
+    }
+
+    function escalateToUMA(bytes32 questionId, BetPosition allegedWinner) external {
         Bet storage bet = bets[questionId];
         require(probabilityParticipant[questionId][msg.sender] > 0, "Not involed in the bet!");
 
@@ -227,35 +234,39 @@ contract Gambit is ERC1155Holder {
         usdc.transfer(msg.sender, address(this), bond)
 
         // Define the question for the oracle
-        bytes memory ancillaryData = abi.encodePacked("Did ", allegedWinningPosition == BetPosition.For ? "Creator" : "Challenger", " win?");
+        bytes memory ancillaryData = abi.encodePacked(
+                "As of timestamp ", block.timestamp, 
+                ", who won the bet with questionId: ", questionId
+        );
 
         // Ask the oracle
-        oo.assertTruth(
+        bytes32 assertionId = oo.assertTruth(
             ancillaryData,
-            msg.sender,
-            address(this),
-            address(0),
-            7200,
-            address(usdc),
+            msg.sender,        // Disputer (receives bond back if correct)
+            address(this),     // Callback recipient
+            address(0),        // No sovereign aid
+            7200,              // Liveness period (2 hours)
+            address(usdc),     // Bond currency
             bond,
-            identifier,
-            0
+            "ASSERT_TRUTH",    // Standard identifier
+            0                  // No reward
         );
+
+        assertionToQuestion[assertionId] = questionId;
+        assertionWinner[assertionId] = allegedWinner;
+        bet.status = BetStatus.Escalated;
+        emit BetEscalated(questionId, msg.sender);
     }
 
     // Called by OO when the assertion is settled
-    function assertionResolvedCallback(bytes32 assertionId, bool assertedTruthfully) public {
+    function assertionResolvedCallback(bytes32 assertionId, bool assertedTruthfully) external {
         require(msg.sender == address(oo), "Only OO can hit the callback!");
-
-        bytes32 questionId = assertionsToQuestions[assertionId];
-        Bet storage bet = bets[questionId];
-
+        Bet storage bet = bets[assertionToQuestion[assertionId]];
  
-        // Either do the opposite, or just reject the claim and leave as disputed
         if (assertedTruthfully) {
-            _finalizeSettlementConflict(questionId, bet.claimedWinner);
+            _valueTokens(questionId, bet, address(0));
         } else {
-            continue;
+            bet.status = BetStatus.Disputed;
         }
     }
 
