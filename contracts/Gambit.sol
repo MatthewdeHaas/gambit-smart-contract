@@ -3,9 +3,6 @@ pragma solidity ^0.8.20;
 
 import "./IConditionalTokens.sol";
 import "./IOOV3.sol";
-// import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-// import "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
-// import "@uma/core/contracts/optimistic-oracle-v3/interfaces/OptimisticOracleV3Interface.sol";
 import "./vendor/@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./vendor/@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
@@ -15,7 +12,7 @@ contract Gambit is ERC1155Holder {
     // Contract objects used throughout the contract, defined when the object is created
     IConditionalTokens public ctf;
     IERC20 public usdc;
-    IOOV3 public immutable oo;
+    IOOV3 public oo;
     bytes32 public immutable defaultIdentifier;
     uint256 maxBetParticipants;
 
@@ -23,9 +20,7 @@ contract Gambit is ERC1155Holder {
         ctf = IConditionalTokens(_ctfAddress);
         usdc = IERC20(_usdcAddress);
         oo = IOOV3(_ooAddress); 
-        defaultIdentifier = oo.defaultIdentifier();
         maxBetParticipants = _maxBetParticipants;
-        usdc.approve(address(ctf), type(uint256).max);
     }
 
     // Enums for convenience/readability
@@ -43,13 +38,21 @@ contract Gambit is ERC1155Holder {
         uint256 voteCount;
     }
 
+    function getParticipants(bytes32 _questionId) public view returns (address[] memory) {
+        return bets[_questionId].participants;
+    }
+
+    function setupApproval() external {
+        usdc.approve(address(ctf), type(uint256).max);
+    }
+
     // Metadata tracker
     mapping(bytes32 => Bet) public bets;
 
     // Participant data
-    mapping(bytes32 => mapping(address => uint256)) participantIndex;
+    mapping(bytes32 => mapping(address => uint256)) public participantIndex;
     mapping(bytes32 => mapping(address => bool)) isInvited;
-    mapping(bytes32 => mapping(address => uint256)) participantProbability;
+    mapping(bytes32 => mapping(address => uint256)) public participantProbability;
     mapping(bytes32 => mapping(address => address)) outcomeVote;
     mapping(bytes32 => mapping(address => uint256)) outcomeVoteCount; // number of votes an address has
     mapping(bytes32 => address) leadingCandidate; // The address of the leading candidate
@@ -70,11 +73,11 @@ contract Gambit is ERC1155Holder {
     event BetDisputed(bytes32 indexed questionId);
     event BetEscalated(bytes32 indexed questionId, address indexed escalator);
 
-    function createBet(bytes32 questionId, uint256 amount, uint256[] calldata challengerProbabilities, address[] calldata challengers, uint256 endTimeStamp) external {
+    function createBet(bytes32 questionId, uint256 amount, address[] calldata challengers, uint256[] calldata challengerProbabilities, uint256 endTimeStamp) external {
         require(bets[questionId].startTimeStamp == 0, "Bet already exists!");
         require(amount > 0, "Amount must be a postive number!");
         require(endTimeStamp > block.timestamp, "Resolution date must be in the future!");
-        require(challengers.length > 1 && challengers.length <= maxBetParticipants - 1, "Invalid number of participants!");
+        require(challengers.length >= 1 && challengers.length <= maxBetParticipants - 1, "Invalid number of participants!");
         require(challengerProbabilities.length == challengers.length, "Incorrect number of probabilities specified!");
         uint256 probSum = 0;
         for (uint256 i = 0; i < challengerProbabilities.length; i++) {
@@ -90,6 +93,7 @@ contract Gambit is ERC1155Holder {
         require(probSum < 1e18, "Probabilities must sum to 1!"); 
 
         // Transfer the USDC from the creator's wallet
+        // usdc.approve(address(ctf), amount);
         usdc.transferFrom(msg.sender, address(this), amount);
 
         // Retrieve the bet struct from storage to save gas
@@ -128,10 +132,11 @@ contract Gambit is ERC1155Holder {
         require(probabilityExists[questionId][probability], "Invalid probability!");
         require(!probabilityTaken[questionId][probability], "Participant already claimed this probability!");
 
-        uint256 creatorProb = participantProbability[questionId][msg.sender];
+        uint256 creatorProb = participantProbability[questionId][bet.participants[0]];
         uint256 joinAmount = (bet.amount * probability) / creatorProb;
    
         // Take money from the joiner
+        // usdc.approve(, joinAmount);
         usdc.transferFrom(msg.sender, address(this), joinAmount);
 
         // Update the bet status

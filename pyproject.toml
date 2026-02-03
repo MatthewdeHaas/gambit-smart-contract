@@ -8,5 +8,6 @@ dependencies = [
     "ape-alchemy>=0.8.10",
     "ape-hardhat>=0.8.5",
     "ape-solidity>=0.8.5",
+    "dotenv>=0.9.9",
     "eth-ape>=0.8.47",
 ]
