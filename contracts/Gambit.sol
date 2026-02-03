@@ -24,7 +24,7 @@ contract Gambit is ERC1155Holder {
     }
 
     // Enums for convenience/readability
-    enum BetStatus { Accepting, Locked, Active, Resolving, Resolved, Disputed, Escalated, Cancelled }
+    enum BetStatus { Accepting, Active, Resolving, Resolved, Disputed, Escalated, Cancelled }
 
    // Bet data
     struct Bet {
@@ -33,6 +33,7 @@ contract Gambit is ERC1155Holder {
         uint256 amount;
         uint256 startTimeStamp;
         uint256 endTimeStamp;
+        bytes32 questionId;
         bytes32 conditionId;
         BetStatus status;
         uint256 voteCount;
@@ -107,6 +108,7 @@ contract Gambit is ERC1155Holder {
         bet.endTimeStamp = endTimeStamp;
         bet.status = BetStatus.Accepting;
         bet.voteCount = 0;
+        bet.questionId = questionId;
 
         uint256 creatorProb = 1e18 - probSum;
         participantIndex[questionId][msg.sender] = 1; // Use 1-based indexing so the empty value (zero) is not confused with the creator
@@ -159,8 +161,9 @@ contract Gambit is ERC1155Holder {
         uint256 pot = (bet.amount * 1e18) / participantProbability[questionId][bet.participants[0]];
             
         // Prepare the condition
-        ctf.prepareCondition(address(this), questionId, bet.numParticipants);
-        bytes32 conditionId = ctf.getConditionId(address(this), questionId, bet.participants.length); 
+        uint256 numOutcomeSlots = bet.numParticipants;
+        ctf.prepareCondition(address(this), questionId, numOutcomeSlots);
+        bytes32 conditionId = ctf.getConditionId(address(this), questionId, numOutcomeSlots); 
         bet.conditionId = conditionId;
 
         // Assign non-overlapping indices to the conditional tokens
@@ -187,7 +190,7 @@ contract Gambit is ERC1155Holder {
     function voteOnOutcome(bytes32 questionId, address vote) external {
         Bet storage bet = bets[questionId];
         // Storage costs relatively more gas, so only store if you need to
-        if (block.timestamp > bet.endTimeStamp && bet.status == BetStatus.Active) {
+        if (block.timestamp >= bet.endTimeStamp && bet.status == BetStatus.Active) {
             bet.status = BetStatus.Resolving;
         }
         require(bet.status == BetStatus.Resolving, "Bet is not currently being resolved!");
@@ -218,15 +221,15 @@ contract Gambit is ERC1155Holder {
         }
     }
 
-
     function _valueTokens(bytes32 questionId, Bet storage bet, address winner) internal {
         // Recall that this mapping is 1-based to avoid confusing index zero and an empty value
         uint256 winnerIndex = participantIndex[questionId][winner] - 1;
-        require(winnerIndex > 0 && winnerIndex <= bet.numParticipants, "Winner not in the participants array!");
+        require(winnerIndex < bet.numParticipants, "Winner not in the participants array!");
 
+        
         uint256[] memory payouts = new uint256[](bet.numParticipants);
         payouts[winnerIndex] = 1;
-        ctf.reportPayouts(bet.conditionId, payouts);
+        ctf.reportPayouts(questionId, payouts);
 
         bet.status = BetStatus.Resolved;
         emit BetResolved(questionId, winner);
